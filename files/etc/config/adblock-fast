@@ -76,6 +76,13 @@ config file_url
 	option enabled '0'
 
 config file_url
+	option name 'Cats-Team - AdRules DNS'
+	option url 'https://cdn.jsdelivr.net/gh/Cats-Team/AdRules@main/domain.txt'
+	option size '4410170'
+	option action 'block'
+	option enabled '0'
+
+config file_url
 	option name '1Hosts - Lite'
 	option url 'https://o0.pages.dev/Lite/domains.txt'
 	option size '2786010'
