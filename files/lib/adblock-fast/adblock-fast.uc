@@ -1844,7 +1844,7 @@ function prepare_file_url(section, url_override, action_override, out_file) {
 	res.url = url; res.name = name; res.action = file_action;
 
 	if (!cfg.enabled) { res.ok = true; res.skip = true; return res; }
-	if (!url) { res.skip = true; return res; }
+	if (!url) { res.code = 'errorDownloadingList'; return res; }
 
 	if (is_https_url(url) && !env.get_downloader().ssl_supported) {
 		res.code = 'errorNoSSLSupport';
@@ -2163,6 +2163,9 @@ function download_lists() {
 	// Downloads are complete: release the old files before the memory-heavy
 	// processing stage, preserving the existing peak-memory strategy.
 	resolver('cleanup');
+	// cleanup() intentionally preserves the shared dnsmasq config path.
+	// Release it too now that downloads have succeeded.
+	unlink(dns_output.file);
 
 	if (cfg.allow_non_ascii) {
 		if (sort_file(tmp.b, tmp.a, true))
@@ -2804,6 +2807,7 @@ function start(args) {
 				// Report the failed refresh without reverting working filtering or
 				// replacing its persistent cache with local/canary domains.
 				status_data.status = 'statusFail';
+				status_service('on_start_failure');
 				return _build_procd_data();
 			}
 			resolver('on_start');

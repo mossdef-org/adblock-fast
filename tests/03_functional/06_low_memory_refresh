@@ -23,10 +23,14 @@ global.system = function(argv, timeout) {
 	if (match(cmd, /^curl /) && index(cmd, 'file://') >= 0) downloads++;
 	return orig_system(argv, timeout);
 };
+let diagnostics = '', orig_warn = global.warn;
+global.warn = function(...args) { diagnostics += join('', args); };
 let result = adb.start(['download']);
+global.warn = orig_warn;
 let ok = result.status == 'statusFail' && result.errors[0]?.code == 'errorTooLittleRam' &&
 	readfile(ti.dns_output.file) == old && readfile(ti.dns_output.cache) == old &&
-	readfile(ti.dns_output.gzip) == compressed && restarts == 0 && downloads == 0;
+	readfile(ti.dns_output.gzip) == compressed && restarts == 0 && downloads == 0 &&
+	index(diagnostics, 'not enough to process all enabled block-lists') >= 0;
 printf('low memory: %s\n', ok ? 'PASS' : 'FAIL');
 -- End --
 

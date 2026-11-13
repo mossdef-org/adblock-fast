@@ -67,13 +67,18 @@ for (let scenario in ['all', 'partial', 'malformed', 'no-cache', 'cold', 'lean',
 	let hosts_content = readfile(hosts);
 	if (scenario == 'malformed') writefile(hosts, '<html>upstream error</html>\n');
 	let before_restarts = restarts;
+	let diagnostics = '', orig_warn = global.warn;
+	global.warn = function(...args) { diagnostics += join('', args); };
 	let result = adb.start(['download']);
+	global.warn = orig_warn;
 	writefile(hosts, hosts_content);
 	let output_ok = scenario == 'cold' ? !stat(ti.dns_output.file) : readfile(ti.dns_output.file) == old;
 	let cache_ok = (scenario == 'no-cache' || scenario == 'cold')
 		? !stat(ti.dns_output.cache) : readfile(ti.dns_output.cache) == old;
 	let ok = result.status == 'statusFail' && length(result.errors) > 0 && output_ok && cache_ok &&
-		readfile(ti.dns_output.gzip) == compressed && restarts == before_restarts;
+		readfile(ti.dns_output.gzip) == compressed && restarts == before_restarts &&
+		index(diagnostics, 'failed to start') >= 0 &&
+		index(diagnostics, result.errors[0].info) >= 0;
 	printf('%s: %s\n', scenario, ok ? 'PASS' : 'FAIL');
 }
 // A later successful refresh must still install new data and rebuild the cache.

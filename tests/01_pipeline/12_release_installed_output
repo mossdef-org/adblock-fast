@@ -1,0 +1,46 @@
+Shared dnsmasq config outputs must survive failed downloads, but be released
+before sorting on successful downloads to avoid retaining a second large list.
+
+-- Testcase --
+import adb from 'adblock-fast';
+import { readfile, writefile, stat } from 'fs';
+let ti = adb._test_internals;
+adb.env.load_config();
+let orig_system = global.system;
+let fail_download = false, saw_sort = false, released = true;
+global.system = function(argv, timeout) {
+	let cmd = '' + argv;
+	if (fail_download && match(cmd, /^curl /)) return 6;
+	if (match(cmd, /^sort /)) {
+		saw_sort = true;
+		if (stat(ti.dns_output.file)) released = false;
+	}
+	return orig_system(argv, timeout);
+};
+for (let mode in ['dnsmasq.conf', 'dnsmasq.ipset', 'dnsmasq.nftset', 'dnsmasq.servers']) {
+	ti.set_cfg('dns', mode);
+	ti.env.dns_set_output_values(mode);
+	ti.status_data.errors = [];
+	let old = 'previous.example.org\n';
+	writefile(ti.dns_output.file, old);
+	fail_download = true;
+	let failed = !ti.download_lists() && readfile(ti.dns_output.file) == old;
+	fail_download = false;
+	ti.status_data.errors = [];
+	saw_sort = false;
+	released = true;
+	let success = ti.download_lists();
+	let content = readfile(ti.dns_output.file) || '';
+	let ok = failed && success && saw_sort && released &&
+		index(content, 'previous.example.org') < 0 &&
+		index(content, 'ad.doubleclick.test.example.com') >= 0;
+	printf('%s: %s\n', mode, ok ? 'PASS' : 'FAIL');
+}
+-- End --
+
+-- Expect stdout --
+dnsmasq.conf: PASS
+dnsmasq.ipset: PASS
+dnsmasq.nftset: PASS
+dnsmasq.servers: PASS
+-- End --
