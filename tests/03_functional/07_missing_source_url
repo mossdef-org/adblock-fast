@@ -1,0 +1,66 @@
+Missing or empty URLs on enabled sources abort serial and parallel refreshes;
+a disabled source without a URL remains ignored.
+
+-- Testcase --
+import adb from 'adblock-fast';
+import { readfile, writefile } from 'fs';
+let ti = adb._test_internals;
+writefile(adb.pkg.config_file, '# test configuration\n');
+writefile(adb.pkg.run_file, '# test configuration\n');
+adb.env.load('quiet');
+adb.env.load_config = function() {};
+ti.set_cfg('blocked_domain', 'local.example.org');
+ti.set_cfg('canary_domains_icloud', true);
+for (let parallel in [false, true]) {
+	if (parallel) {
+		let pending = [];
+		ti.set_cfg('parallel_downloads', 4);
+		ti.set_uloop({
+			init: function() {}, end: function() {}, done: function() {}, timer: function() {},
+			task: function(child, callback) {
+				push(pending, function() { child({ send: callback }); });
+				return {};
+			},
+			run: function() { for (let run in pending) run(); },
+		});
+	}
+	let old = 'server=/previous.example.org/\n';
+	writefile(ti.dns_output.file, old);
+	writefile(ti.dns_output.cache, old);
+	system(sprintf("gzip < '%s' > '%s'", ti.dns_output.file, ti.dns_output.gzip));
+	let compressed = readfile(ti.dns_output.gzip);
+	let orig_warn = global.warn, diagnostics = '';
+	global.warn = function(...args) { diagnostics += join('', args); };
+	let result = adb.start(['download']);
+	global.warn = orig_warn;
+	let ok = result.status == 'statusFail' && length(result.errors) == 2 &&
+		result.errors[0].code == 'errorDownloadingList' && result.errors[0].info == 'Missing URL' &&
+		result.errors[1].code == 'errorDownloadingList' && result.errors[1].info == 'Empty URL' &&
+		index(diagnostics, 'Failed to download Missing URL') >= 0 &&
+		index(diagnostics, 'Failed to download Empty URL') >= 0 &&
+		readfile(ti.dns_output.file) == old && readfile(ti.dns_output.cache) == old &&
+		readfile(ti.dns_output.gzip) == compressed;
+	printf('%s: %s\n', parallel ? 'parallel' : 'serial', ok ? 'PASS' : 'FAIL');
+}
+-- End --
+
+-- Expect stdout --
+serial: PASS
+parallel: PASS
+-- End --
+
+-- File ubus/service~list~name-adblock-fast.json --
+{}
+-- End --
+
+-- File uci/adblock-fast.json --
+{
+  "config": [{".name":"config", "enabled":"1", "dns":"dnsmasq.servers", "verbosity":"0", "force_dns":"0", "config_update_enabled":"0", "update_config_sizes":"0", "parallel_downloads":"0", "compressed_cache":"1", "compressed_cache_dir":"TESTDIR/cache"}],
+  "file_url": [
+    {".name":"missing", "enabled":"1", "name":"Missing URL"},
+    {".name":"empty", "enabled":"1", "name":"Empty URL", "url":""},
+    {".name":"disabled", "enabled":"0", "name":"Disabled without URL"},
+    {".name":"valid", "enabled":"1", "name":"Valid", "url":"file://TESTDIR/data/domains.txt", "size":"5000"}
+  ]
+}
+-- End --

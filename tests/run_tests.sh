@@ -112,6 +112,7 @@ sed -i '/^export default {/,/^};/{
 \t// Test helpers (injected by test runner)\
 \t_test_internals: {\
 \t\tdownload_lists: download_lists,\
+\t\tset_uloop: function(v) { uloop = v; },\
 \t\tdetect_file_type: detect_file_type,\
 \t\tdns_modes: dns_modes,\
 \t\tget_cfg: function() { return cfg; },\

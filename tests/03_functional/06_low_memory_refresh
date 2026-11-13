@@ -1,0 +1,47 @@
+A refresh rejected by the memory budget must leave the working list and caches
+intact without attempting downloads or restarting the resolver.
+
+-- Testcase --
+import adb from 'adblock-fast';
+import { readfile, writefile } from 'fs';
+let ti = adb._test_internals;
+writefile(adb.pkg.config_file, '# test configuration\n');
+writefile(adb.pkg.run_file, '# test configuration\n');
+adb.env.load('quiet');
+adb.env.load_config = function() {};
+ti.set_cfg('blocked_domain', 'local.example.org');
+ti.set_cfg('compressed_cache', true);
+let old = 'server=/previous.example.org/\n';
+writefile(ti.dns_output.file, old);
+writefile(ti.dns_output.cache, old);
+system(sprintf("gzip < '%s' > '%s'", ti.dns_output.file, ti.dns_output.gzip));
+let compressed = readfile(ti.dns_output.gzip);
+let orig_system = global.system, restarts = 0, downloads = 0;
+global.system = function(argv, timeout) {
+	let cmd = '' + argv;
+	if (match(cmd, /^\/etc\/init\.d\//)) restarts++;
+	if (match(cmd, /^curl /) && index(cmd, 'file://') >= 0) downloads++;
+	return orig_system(argv, timeout);
+};
+let diagnostics = '', orig_warn = global.warn;
+global.warn = function(...args) { diagnostics += join('', args); };
+let result = adb.start(['download']);
+global.warn = orig_warn;
+let ok = result.status == 'statusFail' && result.errors[0]?.code == 'errorTooLittleRam' &&
+	readfile(ti.dns_output.file) == old && readfile(ti.dns_output.cache) == old &&
+	readfile(ti.dns_output.gzip) == compressed && restarts == 0 && downloads == 0 &&
+	index(diagnostics, 'not enough to process all enabled block-lists') >= 0;
+printf('low memory: %s\n', ok ? 'PASS' : 'FAIL');
+-- End --
+
+-- Expect stdout --
+low memory: PASS
+-- End --
+
+-- File ubus/service~list~name-adblock-fast.json --
+{}
+-- End --
+
+-- File ubus/system~info.json --
+{"memory":{"total":67108864,"available":1048576},"swap":{"free":0}}
+-- End --

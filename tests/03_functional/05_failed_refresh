@@ -1,0 +1,114 @@
+Failed downloads must not replace an installed list with local/canary rules,
+remove caches, or restart the resolver. Exercise the lifecycle, not just parsing.
+
+-- Testcase --
+import adb from 'adblock-fast';
+import { readfile, writefile, unlink, stat } from 'fs';
+let ti = adb._test_internals;
+writefile(adb.pkg.config_file, '# test configuration\n');
+writefile(adb.pkg.run_file, '# test configuration\n');
+adb.env.load('quiet');
+// Keep our test configuration when start() invokes env.load() again.
+adb.env.load_config = function() {};
+ti.set_cfg('canary_domains_icloud', true);
+ti.set_cfg('blocked_domain', 'local.example.org');
+ti.set_cfg('compressed_cache', true);
+ti.set_cfg('curl_retry', '0');
+let orig_system = global.system;
+let fault = 'all', restarts = 0;
+global.system = function(argv, timeout) {
+	let cmd = '' + argv;
+	if (match(cmd, /^\/etc\/init\.d\//)) restarts++;
+	if (match(cmd, /^curl /)) {
+		if (fault == 'all' || (fault == 'partial' && index(cmd, 'hosts.txt') >= 0))
+			return 6; // DNS resolution failure
+	}
+	return orig_system(argv, timeout);
+};
+
+for (let scenario in ['all', 'partial', 'malformed', 'no-cache', 'cold', 'lean', 'parallel', 'missing-result']) {
+	fault = scenario;
+	if (scenario == 'parallel' || scenario == 'missing-result') {
+		// Exercise the parallel result aggregation without forking test processes.
+		let pending = [];
+		ti.set_cfg('parallel_downloads', 2);
+		ti.set_uloop({
+			init: function() {}, end: function() {}, done: function() {},
+			timer: function() {},
+			task: function(child, callback) {
+				push(pending, function() {
+					if (scenario != 'missing-result') child({ send: callback });
+				});
+				return {};
+			},
+			run: function() { for (let run in pending) run(); },
+		});
+		fault = 'all';
+	}
+	let lean = scenario == 'lean';
+	ti.set_cfg('dns', lean ? 'dnsmasq.conf' : 'dnsmasq.servers');
+	ti.env.dns_set_output_values(lean ? 'dnsmasq.conf' : 'dnsmasq.servers');
+	ti.set_cfg('dnsmasq_config_file_url', lean ? 'file://' + TESTDIR + '/missing-list' : null);
+	let old = 'server=/previous.example.org/\n';
+	writefile(ti.dns_output.file, old);
+	writefile(ti.dns_output.cache, old);
+	orig_system(sprintf("gzip < '%s' > '%s'", ti.dns_output.file, ti.dns_output.gzip));
+	let compressed = readfile(ti.dns_output.gzip);
+	if (scenario == 'no-cache' || scenario == 'cold') {
+		ti.set_cfg('compressed_cache', false);
+		unlink(ti.dns_output.cache);
+		unlink(ti.dns_output.gzip);
+		compressed = null;
+	} else ti.set_cfg('compressed_cache', true);
+	if (scenario == 'cold') unlink(ti.dns_output.file);
+	if (scenario == 'no-cache' || scenario == 'cold') fault = 'all';
+	// The source exists but has an unrecognized format.
+	let hosts = TESTDIR + '/data/hosts.txt';
+	let hosts_content = readfile(hosts);
+	if (scenario == 'malformed') writefile(hosts, '<html>upstream error</html>\n');
+	let before_restarts = restarts;
+	let diagnostics = '', orig_warn = global.warn;
+	global.warn = function(...args) { diagnostics += join('', args); };
+	let result = adb.start(['download']);
+	global.warn = orig_warn;
+	writefile(hosts, hosts_content);
+	let output_ok = scenario == 'cold' ? !stat(ti.dns_output.file) : readfile(ti.dns_output.file) == old;
+	let cache_ok = (scenario == 'no-cache' || scenario == 'cold')
+		? !stat(ti.dns_output.cache) : readfile(ti.dns_output.cache) == old;
+	let ok = result.status == 'statusFail' && length(result.errors) > 0 && output_ok && cache_ok &&
+		readfile(ti.dns_output.gzip) == compressed && restarts == before_restarts &&
+		index(diagnostics, 'failed to start') >= 0 &&
+		index(diagnostics, result.errors[0].info) >= 0;
+	printf('%s: %s\n', scenario, ok ? 'PASS' : 'FAIL');
+}
+// A later successful refresh must still install new data and rebuild the cache.
+fault = null;
+ti.set_uloop(null);
+ti.set_cfg('parallel_downloads', 0);
+ti.set_cfg('dnsmasq_config_file_url', null);
+ti.set_cfg('dns', 'dnsmasq.servers');
+ti.env.dns_set_output_values('dnsmasq.servers');
+let result = adb.start(['download']);
+let current = readfile(ti.dns_output.file) || '';
+let ok = result.status == 'statusSuccess' && length(result.errors) == 0 &&
+	index(current, 'previous.example.org') < 0 &&
+	index(current, 'mask.icloud.com') >= 0 &&
+	stat(ti.dns_output.gzip)?.size > 0 && restarts > 0;
+printf('retry: %s\n', ok ? 'PASS' : 'FAIL');
+-- End --
+
+-- Expect stdout --
+all: PASS
+partial: PASS
+malformed: PASS
+no-cache: PASS
+cold: PASS
+lean: PASS
+parallel: PASS
+missing-result: PASS
+retry: PASS
+-- End --
+
+-- File ubus/service~list~name-adblock-fast.json --
+{}
+-- End --

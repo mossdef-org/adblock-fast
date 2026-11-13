@@ -1844,7 +1844,7 @@ function prepare_file_url(section, url_override, action_override, out_file) {
 	res.url = url; res.name = name; res.action = file_action;
 
 	if (!cfg.enabled) { res.ok = true; res.skip = true; return res; }
-	if (!url) { res.skip = true; return res; }
+	if (!url) { res.code = 'errorDownloadingList'; return res; }
 
 	if (is_https_url(url) && !env.get_downloader().ssl_supported) {
 		res.code = 'errorNoSSLSupport';
@@ -1942,7 +1942,7 @@ function process_file_url(section, url_override, action_override) {
 	emit_dl_line(res);
 	apply_result(res);
 	unlink(out_file);
-	return true;
+	return res.ok;
 }
 
 // ── download_dnsmasq_file ───────────────────────────────────────────
@@ -1951,14 +1951,18 @@ function download_dnsmasq_file() {
 	status_data.message = get_text('statusDownloading') + '...';
 	status_data.status = 'statusDownloading';
 
-	for (let f in [tmp.allowed, tmp.a, tmp.b, tmp.sed, dns_output.file, dns_output.cache]) unlink(f);
+	for (let f in [tmp.allowed, tmp.a, tmp.b, tmp.sed]) unlink(f);
 	if (get_mem_available() < pkg.memory_threshold) {
 		output.print('Low free memory, restarting resolver ');
 		if (resolver('quiet_restart')) output.okn(); else output.failn();
 	}
 	for (let f in [tmp.allowed, tmp.a, tmp.b, tmp.sed]) writefile(f, '');
 	output.info('Downloading dnsmasq file ');
-	process_file_url(null, cfg.dnsmasq_config_file_url, 'file');
+	if (!process_file_url(null, cfg.dnsmasq_config_file_url, 'file')) {
+		for (let f in [tmp.allowed, tmp.a, tmp.b, tmp.sed]) unlink(f);
+		return false;
+	}
+	resolver('cleanup');
 	output.dns('Moving dnsmasq file ');
 	if (move_file(tmp.b, dns_output.file)) {
 		output.ok();
@@ -1967,6 +1971,7 @@ function download_dnsmasq_file() {
 		push(status_data.errors, { code: 'errorMovingDataFile', info: dns_output.file });
 	}
 	output.info('\\n');
+	return true;
 }
 
 // ── download_lists ──────────────────────────────────────────────────
@@ -2015,7 +2020,11 @@ function download_lists() {
 	status_data.message = get_text('statusDownloading') + '...';
 	status_data.status = 'statusDownloading';
 
-	for (let f in [tmp.allowed, tmp.a, tmp.b, tmp.sed, dns_output.file, dns_output.cache, dns_output.gzip]) unlink(f);
+	// Keep the installed list and caches until every source has downloaded
+	// and parsed. The memory budget above uses currently available RAM,
+	// including the cost of retaining the installed list during downloads.
+	let errors_before = length(status_data.errors);
+	for (let f in [tmp.allowed, tmp.a, tmp.b, tmp.sed]) unlink(f);
 	if (get_mem_total() < pkg.memory_threshold) {
 		output.print('Low free memory, restarting resolver ');
 		if (resolver('quiet_restart')) output.okn(); else output.failn();
@@ -2100,6 +2109,13 @@ function download_lists() {
 			process_file_url(cfg_name);
 	}
 
+	// Do not let local/canary domains turn failed downloads into a successful
+	// refresh. A partial allow-list is unsafe too, so require all sources.
+	if (length(status_data.errors) > errors_before) {
+		for (let f in [tmp.allowed, tmp.a, tmp.b, tmp.sed]) unlink(f);
+		return false;
+	}
+
 	let c = cfg.update_config_sizes ? uci(pkg.name) : ram_uci(pkg.name);
 	if (length(c.changes(pkg.name) || [])) {
 		output.verbose(cfg.update_config_sizes
@@ -2143,6 +2159,13 @@ function download_lists() {
 	sed_inplace('/^[[:space:]]*$/d', tmp.b);
 
 	if (!(stat(tmp.b)?.size > 0)) return false;
+
+	// Downloads are complete: release the old files before the memory-heavy
+	// processing stage, preserving the existing peak-memory strategy.
+	resolver('cleanup');
+	// cleanup() intentionally preserves the shared dnsmasq config path.
+	// Release it too now that downloads have succeeded.
+	unlink(dns_output.file);
 
 	if (cfg.allow_non_ascii) {
 		if (sort_file(tmp.b, tmp.a, true))
@@ -2777,11 +2800,16 @@ function start(args) {
 				output.verbose('[INIT] Starting ' + pkg.service_name + '...\\n');
 				status_data.status = 'statusStarting';
 			}
-			resolver('cleanup');
-			if (cfg.dns == 'dnsmasq.conf' && cfg.dnsmasq_config_file_url)
-				download_dnsmasq_file();
-			else
-				download_lists();
+			let downloaded = (cfg.dns == 'dnsmasq.conf' && cfg.dnsmasq_config_file_url)
+				? download_dnsmasq_file() : download_lists();
+			if (!downloaded) {
+				// The installed resolver configuration and caches are still intact.
+				// Report the failed refresh without reverting working filtering or
+				// replacing its persistent cache with local/canary domains.
+				status_data.status = 'statusFail';
+				status_service('on_start_failure');
+				return _build_procd_data();
+			}
 			resolver('on_start');
 		}
 	}
